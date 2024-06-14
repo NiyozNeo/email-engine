@@ -6,6 +6,35 @@ import * as msal from "@azure/msal-node";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "src/prisma/prisma.service";
 import * as graph from "@microsoft/microsoft-graph-client";
+import { NextFunction } from "express";
+
+import { AuthorizationCodePayload } from "@azure/msal-common"; // Adjust the import path if needed
+
+export interface AuthOptions {
+    successRedirect?: string;
+    scopes?: string[];
+    redirectUri?: string;
+    postLogoutRedirectUri?: string;
+}
+
+export interface ExtendedRequest extends Request {
+    session: {
+		destroy(arg0: () => void): unknown;
+        tokenCache?: string;
+        accessToken?: string;
+        idToken?: string;
+        account?: any;
+        pkceCodes?: {
+            verifier: string;
+            challenge: string;
+            challengeMethod: string;
+        };
+        authCodeRequest?: any;
+        authCodeUrlRequest?: any;
+        isAuthenticated?: boolean;
+    };
+    body: any;
+}
 
 @Injectable()
 export class AuthService {
@@ -43,158 +72,117 @@ export class AuthService {
 		this.cryptoProvider = new msal.CryptoProvider();
 	}
 
-	async login(options: {
-		scopes?: string[];
-		redirectUri?: string;
-		successRedirect?: string;
-	}) {
-		const state = this.cryptoProvider.base64Encode(
-			JSON.stringify({
-				successRedirect: options.successRedirect || "/",
-			}),
-		);
+	async login(req: ExtendedRequest, res: Response, next: NextFunction, options: AuthOptions = {}) {
+		const msalInstance = this.getMsalInstance(this.msalConfig);
+        if (req.session.tokenCache) {
+            msalInstance.getTokenCache().deserialize(req.session.tokenCache);
+        }
 
-		const authCodeUrlRequestParams = {
-			state: state,
-			scopes: options.scopes || [],
-			redirectUri:
-				options.redirectUri || this.msalConfig.auth.redirectUri,
-		};
+        const authCodeRequest = {
+            account: req.session.account,
+            scopes: options.scopes || [],
+            redirectUri: options.redirectUri,
+            code: ''
+        };
 
-		const authCodeRequestParams = {
-			state: state,
-			scopes: options.scopes || [],
-			redirectUri:
-				options.redirectUri || this.msalConfig.auth.redirectUri,
-		};
+        try {
+            const tokenResponse = await msalInstance.acquireTokenByCode(authCodeRequest, req.body as AuthorizationCodePayload);
 
-		if (
-			!this.msalConfig.auth.cloudDiscoveryMetadata ||
-			!this.msalConfig.auth.authorityMetadata
-		) {
-			const [cloudDiscoveryMetadata, authorityMetadata] =
-				await Promise.all([
-					this.getCloudDiscoveryMetadata(
-						this.msalConfig.auth.authority,
-					),
-					this.getAuthorityMetadata(this.msalConfig.auth.authority),
-				]);
+            req.session.tokenCache = msalInstance.getTokenCache().serialize();
+            req.session.accessToken = tokenResponse.accessToken;
+            req.session.idToken = tokenResponse.idToken;
+            req.session.account = tokenResponse.account;
+            req.session.isAuthenticated = true;
 
-			this.msalConfig.auth.cloudDiscoveryMetadata = JSON.stringify(
-				cloudDiscoveryMetadata,
-			);
-			this.msalConfig.auth.authorityMetadata =
-				JSON.stringify(authorityMetadata);
-		}
+            res.redirect(options.successRedirect || '/');
+        } catch (error) {
+            next(error);
+        }
+    }
 
-		const msalInstance = this.getMsalInstance();
+	async acquireToken(req: ExtendedRequest, res: Response, next: NextFunction, options: AuthOptions = {}) {
+        if (!req.body || !req.body.state) {
+            return next(new Error('State not found in request'));
+        }
 
-		return this.redirectToAuthCodeUrl(
-			authCodeUrlRequestParams,
-			authCodeRequestParams,
-			msalInstance,
-		);
+        const authCodeRequest = {
+            ...req.session.authCodeRequest,
+            code: req.body.code,
+            codeVerifier: req.session.pkceCodes.verifier,
+        };
+
+		const msalInstance = this.getMsalInstance(this.msalConfig);
+
+        if (req.session.tokenCache) {
+            msalInstance.getTokenCache().deserialize(req.session.tokenCache);
+        }
+
+        try {
+            const tokenResponse = await msalInstance.acquireTokenByCode(authCodeRequest, req.body as AuthorizationCodePayload);
+
+            req.session.tokenCache = msalInstance.getTokenCache().serialize();
+            req.session.idToken = tokenResponse.idToken;
+            req.session.account = tokenResponse.account;
+            req.session.isAuthenticated = true;
+
+            const state = JSON.parse(this.cryptoProvider.base64Decode(req.body.state!));
+            res.redirect(state.successRedirect);
+        } catch (error) {
+            next(error);
+        }
+    }
+
+	async handleRedirect(req: ExtendedRequest, res: Response, next: NextFunction) {
+        // Implement the logic to handle the redirect
+        // This method is called when the user is redirected back to the application
+        // after authentication
+
+        if (!req.body || !req.body.state) {
+            return next(new Error('State not found in request'));
+        }
+
+        const authCodeRequest = {
+            ...req.session.authCodeRequest,
+            code: req.body.code,
+            codeVerifier: req.session.pkceCodes.verifier,
+        };
+
+		const msalInstance = this.getMsalInstance(this.msalConfig);
+
+        if (req.session.tokenCache) {
+            msalInstance.getTokenCache().deserialize(req.session.tokenCache);
+        }
+
+        try {
+            const tokenResponse = await msalInstance.acquireTokenByCode(authCodeRequest, req.body as AuthorizationCodePayload);
+
+            req.session.tokenCache = msalInstance.getTokenCache().serialize();
+            req.session.accessToken = tokenResponse.accessToken;
+            req.session.idToken = tokenResponse.idToken;
+            req.session.account = tokenResponse.account;
+            req.session.isAuthenticated = true;
+
+            const state = JSON.parse(this.cryptoProvider.base64Decode(req.body.state!));
+            res.redirect(state.successRedirect);
+        } catch (error) {
+            next(error);
+        }
+    }
+
+	async logout(req: ExtendedRequest, res: Response, next: NextFunction, options: AuthOptions = {}) {
+		const msalInstance = this.getMsalInstance(this.msalConfig);
+        const logoutUri = msalInstance.clearCache(); // Adjust method name if necessary
+
+        req.session.destroy(() => {
+            res.redirect(logoutUri);
+        });
+    }
+
+	getMsalInstance(msalConfig: msal.Configuration) {
+		return new msal.ConfidentialClientApplication(msalConfig);
 	}
 
-	async acquireToken(options: {
-		scopes?: string[];
-		redirectUri?: string;
-		successRedirect?: string;
-	}) {
-		return async (req, res, next) => {
-			try {
-				const msalInstance = this.getMsalInstance();
-
-				if (req.tokenCache) {
-					msalInstance.getTokenCache().deserialize(req.tokenCache);
-				}
-
-				const tokenResponse = await msalInstance.acquireTokenSilent({
-					account: req.account,
-					scopes: options.scopes || [],
-				});
-
-				req.tokenCache = msalInstance.getTokenCache().serialize();
-				req.accessToken = tokenResponse.accessToken;
-				req.idToken = tokenResponse.idToken;
-				req.account = tokenResponse.account;
-
-				res.redirect(options.successRedirect || "/");
-			} catch (error) {
-				if (error instanceof msal.InteractionRequiredAuthError) {
-					return (
-						await this.login({
-							scopes: options.scopes || [],
-							redirectUri:
-								options.redirectUri ||
-								this.msalConfig.auth.redirectUri,
-							successRedirect: options.successRedirect || "/",
-						})
-					)(req, res, next);
-				}
-
-				next(error);
-			}
-		};
-	}
-
-	async handleRedirect(body: any) {
-		if (!body || !body.state) {
-			throw Error("Error: response not found");
-		}
-
-		const authCodeRequest = {
-			...req.authCodeRequest,
-			code: body.code,
-			codeVerifier: pkceCodes.verifier,
-		};
-
-		try {
-			const msalInstance = this.getMsalInstance();
-
-			if (req.tokenCache) {
-				msalInstance.getTokenCache().deserialize(req.tokenCache);
-			}
-
-			const tokenResponse = await msalInstance.acquireTokenByCode(
-				authCodeRequest,
-				body,
-			);
-
-			req.tokenCache = msalInstance.getTokenCache().serialize();
-			req.idToken = tokenResponse.idToken;
-			req.account = tokenResponse.account;
-			req.isAuthenticated = true;
-
-			const state = JSON.parse(
-				this.cryptoProvider.base64Decode(body.state),
-			);
-
-			return state.successRedirect || "/";
-		} catch (error) {
-			console.log(error);
-		}
-	}
-
-	logout(options: { postLogoutRedirectUri?: string }) {
-		return (req, res, next) => {
-			let logoutUri = `${this.msalConfig.auth.authority}/oauth2/v2.0/`;
-
-			if (options.postLogoutRedirectUri) {
-				logoutUri += `logout?post_logout_redirect_uri=${options.postLogoutRedirectUri}`;
-			}
-
-			req.session.destroy(() => {
-				res.redirect(logoutUri);
-			});
-		};
-	}
-
-	private getMsalInstance() {
-		return new msal.ConfidentialClientApplication(this.msalConfig);
-	}
-
-	private async getCloudDiscoveryMetadata(authority: string) {
+	async getCloudDiscoveryMetadata(authority: string) {
 		const endpoint =
 			"https://login.microsoftonline.com/common/discovery/instance";
 
@@ -202,20 +190,18 @@ export class AuthService {
 			const response = await axios.get(endpoint, {
 				params: {
 					"api-version": "1.1",
-					authorization_endpoint: `${authority}oauth2/v2.0/authorize`,
+					authorization_endpoint: `${authority}/oauth2/v2.0/authorize`,
 				},
 			});
 
 			return response.data;
 		} catch (error) {
-			console.log(error, "error");
-
 			throw error;
 		}
 	}
 
-	private async getAuthorityMetadata(authority: string) {
-		const endpoint = `${authority}/v2.0/.well-known/openid-configuration`;
+	async getAuthorityMetadata(authority: string) {
+		const endpoint = `${authority}/.well-known/openid-configuration`;
 
 		try {
 			const response = await axios.get(endpoint);
@@ -225,32 +211,29 @@ export class AuthService {
 		}
 	}
 
-	async redirectToAuthCodeUrl(
-		authCodeUrlRequestParams,
-		authCodeRequestParams,
-		msalInstance,
-	) {
-		const { verifier, challenge } =
-			await this.cryptoProvider.generatePkceCodes();
+	async getAuthCodeUrl(req: ExtendedRequest, res: Response, next: NextFunction, options: AuthOptions = {}) {
+        req.session.pkceCodes = {
+            verifier: 'your-verifier',
+            challenge: 'your-challenge',
+            challengeMethod: 'S256',
+        };
 
-		const authCodeUrlRequest = {
-			...authCodeUrlRequestParams,
-			responseMode: msal.ResponseMode.FORM_POST,
-			codeChallenge: challenge.challenge,
-			codeChallengeMethod: "S256",
-		};
+		const msalInstance = this.getMsalInstance(this.msalConfig);
 
-		try {
-			const authCodeUrlResponse =
-				await msalInstance.getAuthCodeUrl(authCodeUrlRequest);
+        req.session.authCodeUrlRequest = {
+            redirectUri: options.redirectUri,
+            scopes: options.scopes || [],
+            codeChallenge: req.session.pkceCodes.challenge,
+            codeChallengeMethod: req.session.pkceCodes.challengeMethod,
+        };
 
-			console.log(authCodeUrlResponse, "authCodeUrlResponse");
-
-			return authCodeUrlResponse;
-		} catch (error) {
-			console.log(error, "error");
-		}
-	}
+        try {
+            const authCodeUrlResponse = await msalInstance.getAuthCodeUrl(req.session.authCodeUrlRequest);
+            res.redirect(authCodeUrlResponse);
+        } catch (error) {
+            next(error);
+        }
+    }
 
 	async validateUser(profile: any): Promise<any> {
 		// Implement validation logic for the user profile

@@ -1,8 +1,9 @@
 // auth.controller.ts
 
 import { Controller, Get, Post, Req, Res, Next, Body } from "@nestjs/common";
-import { AuthService } from "./auth.service";
+import { AuthService, ExtendedRequest } from "./auth.service";
 import { ConfigService } from "@nestjs/config";
+import { NextFunction } from "express";
 
 @Controller("auth")
 export class AuthController {
@@ -11,36 +12,50 @@ export class AuthController {
 		private configService: ConfigService,
 	) {}
 
-	@Get("signin")
-	async login(@Res() res: any) {
-		console.log("login");
+	@Get('signin')
+    async signIn(
+        @Req() req: ExtendedRequest,
+        @Res() res: Response,
+        @Next() next: NextFunction,
+    ) {
+        await this.authService.login(req, res, next, {
+            scopes: [],
+            redirectUri: process.env.REDIRECT_URI,
+            successRedirect: '/',
+        });
+    }
 
-		const data = await this.authService.login({
-			scopes: [],
-			redirectUri: this.configService.get("REDIRECT_URI"),
-			successRedirect: "/",
-		});
+    @Get('acquireToken')
+    async acquireToken(
+        @Req() req: ExtendedRequest,
+        @Res() res: Response,
+        @Next() next: NextFunction,
+    ) {
+        await this.authService.acquireToken(req, res, next, {
+            scopes: ['User.Read'],
+            redirectUri: process.env.REDIRECT_URI,
+            successRedirect: '/users/profile',
+        });
+    }
 
-		res.redirect(data);
-	}
+    @Post('redirect')
+    async handleRedirect(
+        @Req() req: ExtendedRequest,
+        @Res() res: Response,
+        @Next() next: NextFunction,
+        @Body() body: any,
+    ) {
+        await this.authService.handleRedirect(req, res, next);
+    }
 
-	@Get("acquireToken")
-	async acquireToken(@Req() req, @Res() res, @Next() next) {
-		return (
-			await this.authService.acquireToken({
-				scopes: ["User.Read"],
-				successRedirect: "/users/profile",
-			})
-		)(req, res, next);
-	}
-
-	@Post("redirect")
-	async handleRedirect(@Body() body, @Res() res, @Next() next) {
-		return await this.authService.handleRedirect(body);
-	}
-
-	// @Get("signout")
-	// async logout(@Req() req, @Res() res, @Session() session) {
-	// 	return this.authService.logout({})(req, res);
-	// }
+    @Get('signout')
+    async signOut(
+        @Req() req: ExtendedRequest,
+        @Res() res: Response,
+        @Next() next: NextFunction,
+    ) {
+        await this.authService.logout(req, res, next, {
+            postLogoutRedirectUri: process.env.POST_LOGOUT_REDIRECT_URI,
+        });
+    }
 }
